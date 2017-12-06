@@ -2,13 +2,7 @@
 title: "R Notebook"
 output: html_notebook
 ---
-
-This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
-
-Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
-
 ```{r}
-library(ggplot2)
 library(mongolite)
 
 # Connect to nba.players collection on MongoDB Server
@@ -16,13 +10,137 @@ m <- mongo(collection = "players", db = "nba", url = "mongodb://127.0.0.1:27017/
 players_list = m$find()
 
 # Convert documents in collection into a dataframe
-players <- data.frame(matrix(unlist(players_list), nrow=30, byrow=F), stringsAsFactors=F)
+players <- data.frame(matrix(unlist(players_list), nrow=30, byrow=F), stringsAsFactors=FALSE)
 # Set column names 
-colnames(players) <- c("Votes", "FG%", "BLK", "MIN", "TO", "TD3", "REB", "FANTASY_PTS", "REB_RANK", "3PA", "AST", "DD2", "GP", "3PM", "PF", "TD3_Rank", "PTS", "FGA", "Name", "+/-", "STL", "AST_RANK", "W", "W%", "FT%_RANK", "FT%", "BLK_RANK", "DD2_RANK", "STL_RANK", "3P%")
+colnames(players) <- c("Votes", "FG%", "BLK", "MIN", "TO", "TD3", "REB", "FANTASY_PTS", "REB_RANK", "3PA", "AST", "DD2", "GP", "3PM", "PF", "TD3_RANK", "PTS", "FGA", "Name", "+/-", "STL", "AST_RANK", "W", "W%", "FT%_RANK", "FT%", "BLK_RANK", "DD2_RANK", "STL_RANK", "3P%")
 
-players
+# Convert all numeric columns to numerics
+numerics <- colnames(players)[-19]
+for (col in numerics) {
+  players[, col] <- as.numeric(players[, col])  
+}
+
+# Order players by ascending vote count
+players <- players[order(players$Votes),]
+
+# Exploratory data plots
+plot(players$PTS, players$Votes)
+  # From the plot, we can see that points per game isn't a very accurate predictor of votes.
+
+plot(players$`W%`, players$Votes)
+  # Neither is win%.
+
+plot(players$FANTASY_PTS, players$Votes)
+  # Fantasy points is a little better.
+
+plot(players$DD2, players$Votes)
+  # Double doubles are pretty arbitrary, and there's obviously a few outliers. 
+  # I'm going to remove this entire column, along with the DD2_RANK column.
+players$DD2 <- NULL
+players$DD2_RANK <- NULL
+
+plot(players$TD3, players$Votes)
+  # While most players don't get triple doubles, the ones who are able to get a lot
+  # are very likely to have a high vote count.
+
+# Multiple linear regression
+
+# Normalizes the given vector's values from 0 to 1.
+# Args: x, a vector
+# Returns: x, a vector whose values are normalized from 0 to 1.
+min.max.normalize <- function(x) {
+  x.min <- min(x)
+  x.max <- max(x)
+  for (i in 1:length(x)) {
+    x[i] <- (x[i] - x.min) / (x.max - x.min)
+  }
+  return(x)
+}
+
+# Min-max normalize the values that are to be used for regression
+players.scaled <- players
+players.scaled$FANTASY_PTS <- min.max.normalize(players.scaled$FANTASY_PTS)
+players.scaled$`+/-` <- min.max.normalize(players.scaled$`+/-`)
+players.scaled$W <- min.max.normalize(players.scaled$W)
+players.scaled$`FG%` <- min.max.normalize(players.scaled$`FG%`)
+players.scaled$`3P%` <- min.max.normalize(players.scaled$`3P%`)
+  
+# Split into random training and testing sets (20 and 10 rows, respectively)
+train_rows <- c(10, 25, 22, 27, 17, 4, 14, 26, 15, 29, 16, 21, 20, 24, 11, 5, 3, 6, 18, 8)
+test_rows <- c(1, 2, 7, 9, 12, 13, 19, 23, 28, 30)
+scaled.train <- players.scaled[train_rows, ]
+scaled.test <- players.scaled[test_rows,]
+
+# Forward fitting of regression parameters
+# Start off with 5 variables that might be good predictors.
+model1 <- lm(Votes ~   FANTASY_PTS + `+/-` + `FG%` + W + `3P%`, data = scaled.train)
+summary(model1)
+# The highest p-value is 3P%. 
+
+# model2 is model1 with 3P% excluded.
+model2 <- lm(Votes ~  FANTASY_PTS + `+/-` + `FG%` + `W`, data = scaled.train)
+summary(model2)
+# Now, +/- has the highest p-value.
+
+# model3 is model2 with +/- removed
+model3 <- lm(Votes ~  FANTASY_PTS + `FG%` + `W`, data = scaled.train)
+summary(model3)
+# FG% has the highest p-value
+
+# model4 is model3 with FG% removed
+model4 <- lm(Votes ~  FANTASY_PTS + `W`, data = scaled.train)
+summary(model4)
+# Now all p-values are <0.01. 
+
+# Construct the final multiple regression model.
+multiple.regression <- predict(model4, newdata = scaled.test)
+
+# kNN
+library(class)
+
+# Create validation sets (with only the Votes column)
+train.def <- scaled.train$Votes
+test.def <- scaled.test$Votes
+
+# Create training sets with only the relevant columns
+columns.to.use <- c("FANTASY_PTS", "W", "FG%")
+scaled.train <- scaled.train[columns.to.use]
+scaled.test <- scaled.test[columns.to.use]
+
+# Compute kNN
+knn.1 <- knn(scaled.train, scaled.test, train.def, k = 1)
+knn.5 <- knn(scaled.train, scaled.test, train.def, k = 5)
+knn.10 <- knn(scaled.train, scaled.test, train.def, k = 10)
+
+# Compare the three models and determine which k-value is the best.
+diff.1 <- 0
+diff.5 <- 0
+diff.10 <- 0
+for (i in 1:10) {
+  diff.1 <- diff.1 + (as.integer(test.def[i]) - as.integer(as.character(knn.1[i])))
+  diff.5 <- diff.5 + (as.integer(test.def[i]) - as.integer(as.character(knn.5[i])))
+  diff.10 <- diff.10 + (as.integer(test.def[i]) - as.integer(as.character(knn.10[i])))
+}
+
+total.test <- sum(test.def)
+
+# Find the error of each kNN model as a percentage of the total difference over the total values.
+knn.difs <- c(diff.1 / total.test, diff.5 / total.test, diff.10 / total.test)
+
+# The lowest error is achieved by using k = 5.
+
+# Compute error for multiple regression the same way as kNN
+diff.regression <- 0
+for (i in 1:10) {
+  diff.regression <- diff.regression + (as.integer(as.character(multiple.regression[i])) - 
+                                          as.integer(as.character(test.def[i])))
+}
+
+print(paste("Multiple regression accuracy:", (1 - abs(diff.regression / total.test))*100, "%", 
+            "kNN accuracy:", (1 - abs(diff.5) / total.test)*100, "%"))
+
+# The kNN with k=5 is the most accurate predictor of all of the models tested. 
+# The results are not 100% consistent, but with many unique runs, the kNN with k=5 seems to
+#   be the most consistently accurate.
+
 ```
-
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
-
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file).

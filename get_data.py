@@ -47,6 +47,7 @@ def get_data():
     records_with_strings = dict((str(k), str(records[k][0])) for k,v in records.iteritems()) 
     # insert document into players collection
     nba.players.insert_one(records_with_strings) 
+    print 'inserted ' + player_name
 
 def main(argc, argv):
   get_data()
